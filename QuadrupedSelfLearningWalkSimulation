@@ -1,0 +1,136 @@
+import mujoco
+import mujoco.viewer
+import numpy as np
+
+QUAD_XML = """
+<mujoco model="spot_v4">
+    <compiler angle="degree" coordinate="local"/>
+    <option timestep="0.002" iterations="50" solver="PGS" gravity="0 0 -9.81"/>
+    
+    <default>
+        <joint damping="0.5" armature="0.01"/>
+        <geom contype="1" conaffinity="1" friction="1.5 0.1 0.1"/>
+        <motor ctrllimited="true" ctrlrange="-1 1"/>
+    </default>
+
+    <worldbody>
+        <light directional="true" diffuse=".8 .8 .8" pos="0 0 5" dir="0 0 -1"/>
+        <geom name="floor" type="plane" size="100 100 0.1" rgba=".2 .3 .4 1"/>
+        
+        <body name="torso" pos="0 0 0.45">
+            <freejoint name="root"/>
+            <geom name="chassis" type="box" size="0.25 0.13 0.07" rgba="0.9 0.8 0 1" mass="4.0"/>
+            
+            <body name="FL_hip" pos="0.2 0.13 0">
+                <inertial pos="0 0 0" mass="0.2" diaginertia="0.001 0.001 0.001"/>
+                <joint name="FL_a" type="hinge" axis="1 0 0" range="-20 20"/>
+                <body name="FL_t" pos="0 0.02 0">
+                    <joint name="FL_p" type="hinge" axis="0 1 0" range="-60 60"/>
+                    <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                    <body name="FL_c" pos="0 0 -0.16">
+                        <joint name="FL_k" type="hinge" axis="0 1 0" range="10 110"/>
+                        <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                        <geom name="FL_foot" type="sphere" size="0.03" pos="0 0 -0.16" rgba="0 0 0 1"/>
+                    </body>
+                </body>
+            </body>
+            <body name="FR_hip" pos="0.2 -0.13 0">
+                <inertial pos="0 0 0" mass="0.2" diaginertia="0.001 0.001 0.001"/>
+                <joint name="FR_a" type="hinge" axis="1 0 0" range="-20 20"/>
+                <body name="FR_t" pos="0 -0.02 0">
+                    <joint name="FR_p" type="hinge" axis="0 1 0" range="-60 60"/>
+                    <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                    <body name="FR_c" pos="0 0 -0.16">
+                        <joint name="FR_k" type="hinge" axis="0 1 0" range="10 110"/>
+                        <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                        <geom name="FR_foot" type="sphere" size="0.03" pos="0 0 -0.16" rgba="0 0 0 1"/>
+                    </body>
+                </body>
+            </body>
+            <body name="BL_hip" pos="-0.2 0.13 0">
+                <inertial pos="0 0 0" mass="0.2" diaginertia="0.001 0.001 0.001"/>
+                <joint name="BL_a" type="hinge" axis="1 0 0" range="-20 20"/>
+                <body name="BL_t" pos="0 0.02 0">
+                    <joint name="BL_p" type="hinge" axis="0 1 0" range="-60 60"/>
+                    <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                    <body name="BL_c" pos="0 0 -0.16">
+                        <joint name="BL_k" type="hinge" axis="0 1 0" range="10 110"/>
+                        <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                        <geom name="BL_foot" type="sphere" size="0.03" pos="0 0 -0.16" rgba="0 0 0 1"/>
+                    </body>
+                </body>
+            </body>
+            <body name="BR_hip" pos="-0.2 -0.13 0">
+                <inertial pos="0 0 0" mass="0.2" diaginertia="0.001 0.001 0.001"/>
+                <joint name="BR_a" type="hinge" axis="1 0 0" range="-20 20"/>
+                <body name="BR_t" pos="0 -0.02 0">
+                    <joint name="BR_p" type="hinge" axis="0 1 0" range="-60 60"/>
+                    <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                    <body name="BR_c" pos="0 0 -0.16">
+                        <joint name="BR_k" type="hinge" axis="0 1 0" range="10 110"/>
+                        <geom type="capsule" size="0.025" fromto="0 0 0 0 0 -0.16" mass="0.3"/>
+                        <geom name="BR_foot" type="sphere" size="0.03" pos="0 0 -0.16" rgba="0 0 0 1"/>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <motor name="FLa" joint="FL_a" gear="50"/><motor name="FLp" joint="FL_p" gear="50"/><motor name="FLk" joint="FL_k" gear="50"/>
+        <motor name="FRa" joint="FR_a" gear="50"/><motor name="FRp" joint="FR_p" gear="50"/><motor name="FRk" joint="FR_k" gear="50"/>
+        <motor name="BLa" joint="BL_a" gear="50"/><motor name="BLp" joint="BL_p" gear="50"/><motor name="BLk" joint="BL_k" gear="50"/>
+        <motor name="BRa" joint="BR_a" gear="50"/><motor name="BRp" joint="BR_p" gear="50"/><motor name="BRk" joint="BR_k" gear="50"/>
+    </actuator>
+</mujoco>
+"""
+
+model = mujoco.MjModel.from_xml_string(QUAD_XML)
+data = mujoco.MjData(model)
+
+best_genes = {"freq": 3.0, "p_bias": 0.0, "k_bias": 0.5, "p_amp": 0.8, "k_amp": 0.8}
+current_genes = best_genes.copy()
+max_dist, generation = 0.0, 1
+
+with mujoco.viewer.launch_passive(model, data) as viewer:
+    while viewer.is_running():
+        up = data.body("torso").xmat.reshape(3, 3)[2, 2]
+        
+        if (data.qpos[2] < 0.2) or (up < 0.6) or (data.time > 8.0):
+            if data.qpos[0] > max_dist + 0.1:
+                max_dist = data.qpos[0]
+                best_genes = current_genes.copy()
+                print(f"GEN {generation:04} | DIST: {max_dist:.2f}m")
+            
+            # Mutate
+            m_pow = 0.3 if max_dist < 0.5 else 0.05
+            for k in current_genes:
+                current_genes[k] = best_genes[k] + np.random.normal(0, m_pow)
+            
+            mujoco.mj_resetData(model, data)
+            data.qpos[2] = 0.5
+            # FIXED INDEX: root velocity is 0-5, joints are 6-17 (Total 18)
+            data.qvel[6:] = np.random.uniform(-2, 2, 12) 
+            generation += 1
+
+        # SPOT TROT LOGIC
+        t, g = data.time, current_genes
+        p1 = np.sin(2 * np.pi * g["freq"] * t)
+        p2 = np.sin(2 * np.pi * g["freq"] * t + np.pi)
+        phases = [p1, p2, p2, p1]
+        
+        ctrls = np.zeros(12)
+        for i in range(4):
+            idx = i * 3
+            # Abduction (stiff stance)
+            ctrls[idx] = 0.2 if i % 2 == 0 else -0.2
+            # Hip Pitch (Trot)
+            ctrls[idx+1] = np.clip(g["p_bias"] + phases[i] * g["p_amp"], -1, 1)
+            # Knee Lift (Synchronized)
+            ctrls[idx+2] = np.clip(g["k_bias"] + (phases[i]) * g["k_amp"], -1, 1)
+
+        data.ctrl[:] = ctrls
+        mujoco.mj_step(model, data)
+        
+        if int(data.time/0.002) % 100 == 0:
+            viewer.sync()
