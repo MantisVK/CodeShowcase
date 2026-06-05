@@ -1,0 +1,298 @@
+#include "main.h"
+#include <vector>
+#include <random>
+#include <cmath>
+#include <algorithm>
+
+/**
+ * A callback function for LLEMU's center button.
+ *
+ * When this callback is fired, it will toggle line 2 of the LCD text between
+ * "I was pressed!" and nothing.
+ */
+void on_center_button() {
+	static bool pressed = false;
+	pressed = !pressed;
+	if (pressed) {
+		pros::lcd::set_text(2, "I was pressed!");
+	} else {
+		pros::lcd::clear_line(2);
+	}
+}
+
+struct Particle {
+    double x;
+    double y;
+    double theta; // in radians
+    double weight;
+};
+
+const int NUM_PARTICLES = 100; 
+std::vector<Particle> particle_cloud;
+
+std::default_random_engine generator;
+void initialize_mcl(double start_x, double start_y, double heading) {
+    particle_cloud.clear();
+    
+    // Uniform distribution to spread particles within a 4-inch radius 
+    std::uniform_real_distribution<double> r_dist(0.0, 4.0);
+    std::uniform_real_distribution<double> phi_dist(0.0, 2.0 * M_PI);
+
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        double r = r_dist(generator);
+        double phi = phi_dist(generator);
+
+        Particle p;
+        p.x = start_x + r * std::cos(phi); // Randomly spread in a 4-inch radius 
+        p.y = start_y + r * std::sin(phi);
+        p.theta = heading;                 // Heading is assumed perfectly accurate [cite: 34]
+        p.weight = 1.0 / NUM_PARTICLES;    // All particles are equally likely at start 
+        particle_cloud.push_back(p);
+    }
+}
+
+void motion_update(double delta_x, double delta_y, double delta_theta) {
+    // Standard deviation for movement noise 
+    // Higher speeds lead to greater potential misreadings [cite: 28]
+    double speed_factor = std::sqrt(delta_x * delta_x + delta_y * delta_y);
+    std::normal_distribution<double> noise(0.0, 0.05 + (speed_factor * 0.1)); 
+
+    for (auto& p : particle_cloud) {
+        // Rotate local odometry deltas into the individual particle's frame [cite: 26]
+        double cos_t = std::cos(p.theta);
+        double sin_t = std::sin(p.theta);
+        
+        double world_dx = delta_x * cos_t - delta_y * sin_t;
+        double world_dy = delta_x * sin_t + delta_y * cos_t;
+
+        // Shift the particle and add motion randomness [cite: 27, 29]
+        p.x += world_dx + noise(generator);
+        p.y += world_dy + noise(generator);
+        p.theta += delta_theta; // Heading tracking remains absolute [cite: 34]
+    }
+}
+
+void sensor_update(pros::Distance& distance_sensor) {
+    double actual_dist = distance_sensor.get() / 25.4; // Convert mm to inches
+    double total_weight = 0;
+    
+    // Constants for your field configuration (0,0 is the center of the field) [cite: 16]
+    const double WALL_X_BACK = -72.0; 
+    const double SENSOR_LIMIT = 120.0 / 25.4; // Example sensor limit converted to inches [cite: 48]
+
+    for (auto& p : particle_cloud) {
+        double expected_dist = 0;
+
+        // If the sensor exceeds its limit or reads nothing, use it as situational positioning 
+        if (actual_dist > SENSOR_LIMIT || actual_dist == 0) {
+            // If it reads nothing, we know it's pointing somewhere open [cite: 49]
+            // We give higher probability to particles that are far from walls
+            expected_dist = p.x - WALL_X_BACK;
+            p.weight *= (expected_dist > SENSOR_LIMIT) ? 1.0 : 0.1; [cite: 37]
+        } else {
+            // Normal Reading: Predict what the distance sensor should see 
+            expected_dist = p.x - WALL_X_BACK; 
+
+            // Map the distance error to a probability using a Gaussian distribution 
+            double error = actual_dist - expected_dist;
+            double sigma = 1.5; // Expected sensor variance in inches [cite: 8]
+            double probability = std::exp(-(error * error) / (2 * sigma * sigma));
+
+            // Multiply the probability by the existing weight [cite: 37, 39]
+            p.weight *= probability; 
+        }
+        total_weight += p.weight;
+    }
+
+    // Normalize weights so they add up to 1.0
+    if (total_weight > 0) {
+        for (auto& p : particle_cloud) {
+            p.weight /= total_weight;
+        }
+    } else {
+        // If all weights drop to 0, ignore sensor readings and reset uniformly [cite: 11]
+        for (auto& p : particle_cloud) p.weight = 1.0 / NUM_PARTICLES;
+    }
+}	
+
+void resample_particles() {
+    std::vector<Particle> new_particles;
+    std::uniform_real_distribution<double> dist(0.0, 1.0 / NUM_PARTICLES);
+    
+    double r = dist(generator);
+    double c = particle_cloud.weight;
+    int i = 0;
+
+    // Low Variance/Systematic Resampling [cite: 40, 41]
+    for (int m = 0; m < NUM_PARTICLES; m++) {
+        double u = r + m * (1.0 / NUM_PARTICLES);
+        while (u > c && i < NUM_PARTICLES - 1) {
+            i++;
+            c += particle_cloud[i].weight;
+        }
+        new_particles.push_back(particle_cloud[i]);
+    }
+
+    // Reset the weights uniformly once the new particles are generated 
+    for (auto& p : new_particles) {
+        p.weight = 1.0 / NUM_PARTICLES;
+    }
+
+    particle_cloud = new_particles;
+}
+
+lemlib::Pose calculate_mcl_pose(lemlib::Pose old_position) {
+    double weight_sum = 0;
+    double weighted_x = 0;
+    double weighted_y = 0;
+    
+    double search_radius = 5.0; // The local circle to look for high probability particles [cite: 47]
+
+    for (const auto& p : particle_cloud) {
+        // Compute distance from the old robot position seed [cite: 44, 45]
+        double dx = p.x - old_position.x;
+        double dy = p.y - old_position.y;
+        double distance = std::sqrt(dx * dx + dy * dy);
+
+        // Only include particles inside our target circle [cite: 47]
+        if (distance <= search_radius) {
+            weighted_x += p.x * p.weight;
+            weighted_y += p.y * p.weight;
+            weight_sum += p.weight;
+        }
+    }
+
+    // If no particles fell inside the local circle, fall back to the entire cloud's average
+    if (weight_sum == 0) {
+        double total_x = 0, total_y = 0;
+        for (const auto& p : particle_cloud) {
+            total_x += p.x;
+            total_y += p.y;
+        }
+        return lemlib::Pose(total_x / NUM_PARTICLES, total_y / NUM_PARTICLES, old_position.theta);
+    }
+
+    // Return the calculated weighted mean position [cite: 38, 46]
+    return lemlib::Pose(weighted_x / weight_sum, weighted_y / weight_sum, old_position.theta);
+}
+
+// External reference to your LemLib chassis config (defined in your main.cpp)
+extern lemlib::Chassis chassis;
+
+void mcl_localization_task() {
+    pros::Distance dist_sensor(15); // Distance sensor plugged into Port 15 [cite: 33]
+    
+    // Establish initial tracking markers 
+    lemlib::Pose last_lemlib_pose = chassis.getPose();
+    initialize_mcl(last_lemlib_pose.x, last_lemlib_pose.y, last_lemlib_pose.theta);
+    
+    lemlib::Pose final_mcl_pose = last_lemlib_pose;
+
+    while (true) { // Runs nonstop 
+        // 1. Calculate relative changes via LemLib Odometry [cite: 4, 15, 23]
+        lemlib::Pose current_lemlib_pose = chassis.getPose();
+        
+        double global_dx = current_lemlib_pose.x - last_lemlib_pose.x;
+        double global_dy = current_lemlib_pose.y - last_lemlib_pose.y;
+        double delta_theta = current_lemlib_pose.theta - last_lemlib_pose.theta;
+
+        // Transform global movement deltas to the robot's local frame [cite: 23]
+        double cos_t = std::cos(-last_lemlib_pose.theta);
+        double sin_t = std::sin(-last_lemlib_pose.theta);
+        double delta_x = global_dx * cos_t - global_dy * sin_t;
+        double delta_y = global_dx * sin_t + global_dy * cos_t;
+
+        last_lemlib_pose = current_lemlib_pose; // Store configuration for the next loop iteration
+
+        // 2. Execute the localization pipeline updates [cite: 12, 13, 14]
+        motion_update(delta_x, delta_y, delta_theta);
+        sensor_update(dist_sensor);
+        resample_particles();
+
+        // 3. Generate the absolute position estimate [cite: 2, 14]
+        final_mcl_pose = calculate_mcl_pose(final_mcl_pose);
+
+        // 4. Periodically feed the corrected pose back to LemLib
+        // Note: Updates LemLib's position matrix without generating chassis movement 
+        chassis.setPose(final_mcl_pose.x, final_mcl_pose.y, current_lemlib_pose.theta);
+
+        pros::delay(10); // Loop executes exactly every 10 milliseconds 
+    }
+}
+
+/**
+ * Runs initialization code. This occurs as soon as the program is started.
+ *
+ * All other competition modes are blocked by initialize; it is recommended
+ * to keep execution time for this mode under a few seconds.
+ */
+void initialize() {
+	pros::lcd::initialize();
+	pros::lcd::set_text(1, "Hello PROS User!");
+
+	pros::lcd::register_btn1_cb(on_center_button);
+}
+
+/**
+ * Runs while the robot is in the disabled state of Field Management System or
+ * the VEX Competition Switch, following either autonomous or opcontrol. When
+ * the robot is enabled, this task will exit.
+ */
+void disabled() {}
+
+/**
+ * Runs after initialize(), and before autonomous when connected to the Field
+ * Management System or the VEX Competition Switch. This is intended for
+ * competition-specific initialization routines, such as an autonomous selector
+ * on the LCD.
+ *
+ * This task will exit when the robot is enabled and autonomous or opcontrol
+ * starts.
+ */
+void competition_initialize() {}
+
+/**
+ * Runs the user autonomous code. This function will be started in its own task
+ * with the default priority and stack size whenever the robot is enabled via
+ * the Field Management System or the VEX Competition Switch in the autonomous
+ * mode. Alternatively, this function may be called in initialize or opcontrol
+ * for non-competition testing purposes.
+ *
+ * If the robot is disabled or communications is lost, the autonomous task
+ * will be stopped. Re-enabling the robot will restart the task, not re-start it
+ * from where it left off.
+ */
+void autonomous() {}
+
+/**
+ * Runs the operator control code. This function will be started in its own task
+ * with the default priority and stack size whenever the robot is enabled via
+ * the Field Management System or the VEX Competition Switch in the operator
+ * control mode.
+ *
+ * If no competition control is connected, this function will run immediately
+ * following initialize().
+ *
+ * If the robot is disabled or communications is lost, the
+ * operator control task will be stopped. Re-enabling the robot will restart the
+ * task, not resume it from where it left off.
+ */
+void opcontrol() {
+	pros::Controller master(pros::E_CONTROLLER_MASTER);
+	pros::MotorGroup left_mg({1, -2, 3});    // Creates a motor group with forwards ports 1 & 3 and reversed port 2
+	pros::MotorGroup right_mg({-4, 5, -6});  // Creates a motor group with forwards port 5 and reversed ports 4 & 6
+
+
+	while (true) {
+		pros::lcd::print(0, "%d %d %d", (pros::lcd::read_buttons() & LCD_BTN_LEFT) >> 2,
+		                 (pros::lcd::read_buttons() & LCD_BTN_CENTER) >> 1,
+		                 (pros::lcd::read_buttons() & LCD_BTN_RIGHT) >> 0);  // Prints status of the emulated screen LCDs
+
+		// Arcade control scheme
+		int dir = master.get_analog(ANALOG_LEFT_Y);    // Gets amount forward/backward from left joystick
+		int turn = master.get_analog(ANALOG_RIGHT_X);  // Gets the turn left/right from right joystick
+		left_mg.move(dir - turn);                      // Sets left motor voltage
+		right_mg.move(dir + turn);                     // Sets right motor voltage
+		pros::delay(20);                               // Run for 20 ms then update
+	}
+}
