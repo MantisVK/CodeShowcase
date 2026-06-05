@@ -1,0 +1,92 @@
+import mujoco
+import mujoco.viewer
+import numpy as np
+import time
+
+# --- TERRAIN GENERATION ---
+def generate_rough_terrain(size=100, scale=0.05):
+    """Creates a random elevation grid for the MuJoCo hfield."""
+    terrain = np.random.uniform(0, scale, (size, size))
+    return terrain
+
+# Generate the data for the height field
+terrain_data = generate_rough_terrain(size=64, scale=0.1) # scale = max rock height
+
+# --- INTEGRATED MODEL WITH HFIELD ---
+XML_MODEL = f"""
+<mujoco model="inchworm_rough_terrain">
+    <compiler angle="degree" coordinate="local"/>
+    <option timestep="0.001" iterations="50" solver="PGS" gravity="0 0 -9.81"/>
+
+    <asset>
+        <hfield name="rough_patch" size="5 5 0.2 0.02" nrow="64" ncol="64"/>
+        <texture name="grid" type="2d" builtin="checker" rgb1=".1 .2 .3" rgb2=".2 .3 .4" width="300" height="300"/>
+        <material name="grid_mat" texture="grid" texrepeat="5 5"/>
+    </asset>
+
+    <worldbody>
+        <light directional="true" diffuse=".8 .8 .8" pos="0 0 5" dir="0 0 -1"/>
+        
+        <geom name="terrain" type="hfield" hfield="rough_patch" pos="2 0 -0.01" rgba="0.5 0.4 0.3 1" friction="1.2 0.05 0.001"/>
+        <geom name="start_pad" type="plane" size="1 1 .01" pos="0 0 0" rgba="0.3 0.3 0.3 1" friction="1.2 0.05 0.001"/>
+
+        <body name="rear_foot" pos="0 0 0.05">
+            <joint name="root" type="free"/>
+            <geom type="box" size="0.05 0.05 0.01" rgba="0 0.4 1 1" friction="1.5 0.05 0.0001" mass="1.0"/>
+            
+            <body name="mid_link" pos="0.05 0 0">
+                <joint name="rear_joint" type="hinge" axis="0 1 0" range="-70 70" damping="15"/>
+                <geom type="box" size="0.1 0.04 0.01" pos="0.1 0 0" rgba="0 0.8 0.4 1" mass="0.2"/>
+                
+                <body name="front_foot" pos="0.2 0 0">
+                    <joint name="front_joint" type="hinge" axis="0 1 0" range="-70 70" damping="15"/>
+                    <geom type="box" size="0.05 0.05 0.01" pos="0.05 0 0" rgba="0 0.4 1 1" friction="1.5 0.05 0.0001" mass="1.0"/>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <position name="rear_motor" joint="rear_joint" kp="250"/>
+        <position name="front_motor" joint="front_joint" kp="250"/>
+    </actuator>
+</mujoco>
+"""
+
+# Load model
+model = mujoco.MjModel.from_xml_string(XML_MODEL)
+# Inject the generated terrain data into the model asset
+model.hfield_data[:] = terrain_data.flatten()
+data = mujoco.MjData(model)
+
+def calculate_stability(data):
+    # Tilt Penalty (deviating from vertical world Z)
+    tilt_rad = np.arccos(np.clip(data.xmat[1, 8], -1.0, 1.0))
+    # Bounce Penalty (vertical velocity spikes)
+    v_z = abs(data.qvel[2])
+    
+    score = 100 - (np.degrees(tilt_rad) * 1.8) - (v_z * 35)
+    return np.clip(score, 0, 100)
+
+with mujoco.viewer.launch_passive(model, data) as viewer:
+    print(f"{'Time':>8} | {'Stability %':>12} | {'Terrain Status'}")
+    
+    while viewer.is_running():
+        step_start = time.time()
+
+        # Gait: Increase Amplitude slightly for rough terrain
+        t = data.time
+        data.ctrl[0] = 0.6 * np.sin(2 * np.pi * 0.8 * t)
+        data.ctrl[1] = -0.6 * np.sin(2 * np.pi * 0.8 * t + 1.2)
+
+        mujoco.mj_step(model, data)
+        
+        # Stability Prediction
+        stab = calculate_stability(data)
+        
+        if int(t * 1000) % 500 == 0:
+            status = "CLEAR" if stab > 80 else "ROUGH" if stab > 50 else "DANGER"
+            print(f"{t:8.2f} | {stab:10.1f}% | {status}")
+
+        viewer.sync()
+        time.sleep(max(0, model.opt.timestep - (time.time() - step_start)))
