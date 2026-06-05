@@ -1,0 +1,85 @@
+import random
+import collections
+import copy
+
+class MazeSimulator:
+    def __init__(self, width=15, height=15):
+        self.width = width if width % 2 != 0 else width + 1
+        self.height = height if height % 2 != 0 else height + 1
+        self.maze = [[1] * self.width for _ in range(self.height)]
+        self.start = (1, 1)
+        self.exit = (self.width - 2, self.height - 2)
+        self._generate_maze(1, 1)
+
+    def _generate_maze(self, x, y):
+        self.maze[y][x] = 0
+        dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+        random.shuffle(dirs)
+        for dx, dy in dirs:
+            nx, ny = x + dx*2, y + dy*2
+            if 0 < nx < self.width and 0 < ny < self.height and self.maze[ny][nx] == 1:
+                self.maze[y + dy][x + dx] = 0
+                self._generate_maze(nx, ny)
+
+    def display_search(self, visited_nodes, title):
+        print(f"\n--- {title} ---")
+        for y in range(self.height):
+            row = ""
+            for x in range(self.width):
+                if (x, y) == self.start: row += " S "
+                elif (x, y) == self.exit: row += " E "
+                elif (x, y) in visited_nodes: row += " . " # Path taken
+                elif self.maze[y][x] == 1: row += "███"
+                else: row += "   "
+            print(row)
+        print("-" * (self.width * 3))
+
+    def get_neighbors(self, pos):
+        x, y = pos
+        res = []
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.width and 0 <= ny < self.height and self.maze[ny][nx] == 0:
+                res.append((nx, ny))
+        return res
+
+def simulate_standard_visual(sim):
+    stack = [(sim.start, [])]
+    visited = set()
+    search_order = [] # To show exactly what the robot touched
+    while stack:
+        curr, path = stack.pop()
+        if curr in visited: continue
+        visited.add(curr)
+        search_order.append(curr)
+        if curr == sim.exit: break
+        for n in sim.get_neighbors(curr):
+            if n not in visited:
+                stack.append((n, path + [curr]))
+    return search_order
+
+def simulate_swarm_visual(sim):
+    queue = collections.deque([(sim.start, [sim.start])])
+    visited = {sim.start}
+    while queue:
+        curr, path = queue.popleft()
+        if curr == sim.exit:
+            return path # Swarm only "keeps" the winning path
+        for n in sim.get_neighbors(curr):
+            if n not in visited:
+                visited.add(n)
+                queue.append((n, path + [n]))
+    return []
+
+# --- RUN VISUALIZATION ---
+sim = MazeSimulator(15, 15)
+
+# 1. Standard Search Visualization
+std_visited = simulate_standard_visual(sim)
+sim.display_search(std_visited, "STANDARD SEARCH (Touches Dead Ends)")
+print(f"Total cells explored/visited: {len(std_visited)}")
+
+# 2. Swarm Search Visualization
+swm_path = simulate_swarm_visual(sim)
+sim.display_search(swm_path, "SWARM SEARCH (Only the Successful Path)")
+print(f"Total time units (Path Depth): {len(swm_path)}")
